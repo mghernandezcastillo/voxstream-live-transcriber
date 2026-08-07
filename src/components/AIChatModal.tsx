@@ -128,7 +128,7 @@ export const AIChatModal: React.FC<AIChatModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({ answer: "No se pudo obtener una respuesta válida del servidor." }));
 
       const botMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),

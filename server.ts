@@ -63,9 +63,8 @@ INSTRUCCIONES IMPORTANTES:
 Responde estrictamente en formato JSON.
 `;
 
-    const modelsToTry = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest"];
     let jsonText = "";
-    let lastErr: any = null;
 
     for (const modelName of modelsToTry) {
       try {
@@ -117,9 +116,8 @@ Responde estrictamente en formato JSON.
         }
       } catch (err: any) {
         console.warn(`[transcribe-chunk] Model ${modelName} with schema failed:`, err?.message || err);
-        lastErr = err;
 
-        // Try without explicit responseSchema (prompt-based JSON)
+        // Fallback without explicit schema
         try {
           const responseSimple = await ai.models.generateContent({
             model: modelName,
@@ -144,13 +142,18 @@ Responde estrictamente en formato JSON.
           }
         } catch (err2: any) {
           console.warn(`[transcribe-chunk] Model ${modelName} without schema failed:`, err2?.message || err2);
-          lastErr = err2;
         }
       }
     }
 
+    // If audio was undecodable or silent or no response, return graceful empty result
     if (!jsonText) {
-      throw lastErr || new Error("No se pudo obtener respuesta de ningún modelo de IA.");
+      return res.json({
+        transcript: "",
+        detectedLanguage: "Español",
+        speaker: "",
+        hasSpeech: false,
+      });
     }
 
     let parsed = { transcript: "", detectedLanguage: "Español", speaker: "", hasSpeech: false };
@@ -166,7 +169,13 @@ Responde estrictamente en formato JSON.
     return res.json(parsed);
   } catch (error: any) {
     console.error("Error in /api/transcribe-chunk:", error);
-    return res.status(500).json({ error: error?.message || "Error al procesar el audio" });
+    return res.json({
+      transcript: "",
+      detectedLanguage: "Español",
+      speaker: "",
+      hasSpeech: false,
+      warning: "Non-fatal chunk processing issue",
+    });
   }
 });
 
