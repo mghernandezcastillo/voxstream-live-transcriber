@@ -183,7 +183,49 @@ export default function App() {
     }
   };
 
-  // Setup MediaRecorder and slice chunks
+// Helper to encode Float32 PCM audio into standard 16-bit PCM WAV Blob
+function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  /* RIFF identifier */
+  for (let i = 0; i < 4; i++) view.setUint8(i, "RIFF".charCodeAt(i));
+  /* RIFF chunk length */
+  view.setUint32(4, 36 + samples.length * 2, true);
+  /* RIFF type */
+  for (let i = 0; i < 4; i++) view.setUint8(8 + i, "WAVE".charCodeAt(i));
+  /* format chunk identifier */
+  for (let i = 0; i < 4; i++) view.setUint8(12 + i, "fmt ".charCodeAt(i));
+  /* format chunk length */
+  view.setUint32(16, 16, true);
+  /* sample format (raw PCM) */
+  view.setUint16(20, 1, true);
+  /* channel count (1 = mono) */
+  view.setUint16(22, 1, true);
+  /* sample rate */
+  view.setUint32(24, sampleRate, true);
+  /* byte rate (sampleRate * 2) */
+  view.setUint32(28, sampleRate * 2, true);
+  /* block align */
+  view.setUint16(32, 2, true);
+  /* bits per sample */
+  view.setUint16(34, 16, true);
+  /* data chunk identifier */
+  for (let i = 0; i < 4; i++) view.setUint8(36 + i, "data".charCodeAt(i));
+  /* data chunk length */
+  view.setUint32(40, samples.length * 2, true);
+
+  // Write PCM samples
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+  // Setup audio capture using Web Audio PCM sampling for 100% clean WAV chunks
   const startAudioRecorder = async (mediaStream: MediaStream) => {
     try {
       const audioTracks = mediaStream.getAudioTracks();
@@ -203,75 +245,83 @@ export default function App() {
         audioContextRef.current = null;
       }
 
-      let recordingStream: MediaStream;
-
-      // Normalize stream via AudioContext to ensure 100% MediaRecorder compatibility across YouTube / exams / live tabs
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const ctx = new AudioCtx();
-          if (ctx.state === "suspended") {
-            await ctx.resume();
-          }
-          const source = ctx.createMediaStreamSource(mediaStream);
-          const dest = ctx.createMediaStreamDestination();
-          source.connect(dest);
-          audioContextRef.current = ctx;
-          recordingStream = dest.stream;
-        } else {
-          recordingStream = new MediaStream(audioTracks);
-        }
-      } catch (audioCtxErr) {
-        console.warn("AudioContext normalization failed, using raw audio tracks:", audioCtxErr);
-        recordingStream = new MediaStream(audioTracks);
-      }
-
-      const mimeType = getSupportedAudioMimeType();
-      let mediaRecorder: MediaRecorder;
-      try {
-        mediaRecorder = mimeType
-          ? new MediaRecorder(recordingStream, { mimeType })
-          : new MediaRecorder(recordingStream);
-      } catch (e) {
-        console.warn("MediaRecorder creation with mimeType failed, falling back to default:", e);
-        mediaRecorder = new MediaRecorder(recordingStream);
-      }
-
-      recorderRef.current = mediaRecorder;
       isRecordingRef.current = true;
       startTimeRef.current = Date.now();
-
-      const effectiveMimeType = mediaRecorder.mimeType || mimeType || "audio/webm";
-
-      mediaRecorder.ondataavailable = async (e) => {
-        if (e.data && e.data.size > 1000) {
-          await processAudioChunk(e.data, effectiveMimeType);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        // Restart recording next chunk if still actively transcribing
-        if (isRecordingRef.current && recorderRef.current && recorderRef.current.state === "inactive") {
-          try {
-            recorderRef.current.start();
-          } catch (err) {
-            console.warn("Error restarting MediaRecorder for next chunk:", err);
-          }
-        }
-      };
-
-      mediaRecorder.start(); // Start recording chunk 1
       setTranscriptionState("recording");
 
-      // Periodically stop & restart MediaRecorder so every chunk is a 100% standalone valid WebM file with EBML header
-      const intervalMs = settings.chunkDurationSec * 1000;
-      chunkIntervalRef.current = window.setInterval(() => {
-        if (isRecordingRef.current && recorderRef.current && recorderRef.current.state === "recording") {
-          recorderRef.current.stop(); // Triggers ondataavailable with complete header + onstop restarts
+      let pcmBuffers: Float32Array[] = [];
+
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioCtx();
+        if (ctx.state === "suspended") {
+          await ctx.resume();
         }
-      }, intervalMs);
+        audioContextRef.current = ctx;
+
+        // Isolate audio tracks strictly in new MediaStream to prevent Chrome video track errors
+        const audioOnlyStream = new MediaStream(audioTracks);
+        const source = ctx.createMediaStreamSource(audioOnlyStream);
+        const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (!isRecordingRef.current) return;
+          const input = e.inputBuffer.getChannelData(0);
+          pcmBuffers.push(new Float32Array(input));
+        };
+
+        source.connect(processor);
+        processor.connect(ctx.destination);
+
+        const intervalMs = settings.chunkDurationSec * 1000;
+        chunkIntervalRef.current = window.setInterval(async () => {
+          if (!isRecordingRef.current || pcmBuffers.length === 0) return;
+
+          const currentBuffers = pcmBuffers;
+          pcmBuffers = [];
+
+          const totalSamples = currentBuffers.reduce((acc, b) => acc + b.length, 0);
+          if (totalSamples < ctx.sampleRate * 0.3) return; // ignore tiny buffers (<0.3s)
+
+          const merged = new Float32Array(totalSamples);
+          let offset = 0;
+          for (const buf of currentBuffers) {
+            merged.set(buf, offset);
+            offset += buf.length;
+          }
+
+          const wavBlob = encodeWAV(merged, ctx.sampleRate);
+          console.log(`[VoxStream PCM Capture] Chunk WAV generado: ${merged.length} muestras (${wavBlob.size} bytes, ${ctx.sampleRate}Hz)`);
+          await processAudioChunk(wavBlob, "audio/wav");
+        }, intervalMs);
+
+      } catch (audioCtxErr) {
+        console.warn("AudioContext PCM capture failed, falling back to MediaRecorder:", audioCtxErr);
+
+        const recordingStream = new MediaStream(audioTracks);
+        const mimeType = getSupportedAudioMimeType();
+        let mediaRecorder: MediaRecorder;
+        try {
+          mediaRecorder = mimeType
+            ? new MediaRecorder(recordingStream, { mimeType })
+            : new MediaRecorder(recordingStream);
+        } catch (e) {
+          mediaRecorder = new MediaRecorder(recordingStream);
+        }
+
+        recorderRef.current = mediaRecorder;
+        const effectiveMimeType = mediaRecorder.mimeType || mimeType || "audio/webm";
+
+        mediaRecorder.ondataavailable = async (e) => {
+          if (e.data && e.data.size > 1000) {
+            await processAudioChunk(e.data, effectiveMimeType);
+          }
+        };
+
+        mediaRecorder.start(settings.chunkDurationSec * 1000);
+      }
     } catch (err: any) {
-      console.error("Failed to start MediaRecorder:", err);
+      console.error("Failed to start audio recorder:", err);
       setErrorMessage(`No se pudo iniciar el grabador de audio: ${err.message || "Error del navegador"}`);
       setTranscriptionState("idle");
     }
@@ -304,7 +354,8 @@ export default function App() {
 
       if (!res.ok) {
         const errorJson = await res.json().catch(() => ({}));
-        throw new Error(errorJson.error || `HTTP ${res.status}`);
+        console.warn(`[VoxStream API Warning] Servidor devolvió ${res.status}:`, errorJson);
+        return;
       }
 
       const data = await res.json();

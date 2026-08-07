@@ -9,8 +9,9 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-// Increase payload limit for base64 audio chunks
-app.use(express.json({ limit: "25mb" }));
+// Increase payload limit for base64 audio chunks & images
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Initialize GoogleGenAI
 const getGenAI = () => {
@@ -31,7 +32,7 @@ const getGenAI = () => {
 // API Endpoint: Transcribe Audio Chunk
 app.post("/api/transcribe-chunk", async (req, res) => {
   try {
-    const { audioBase64, mimeType, previousContext = "", targetLanguage = "auto" } = req.body;
+    const { audioBase64, mimeType, previousContext = "", targetLanguage = "auto" } = req.body || {};
 
     if (!audioBase64) {
       return res.status(400).json({ error: "No audio data provided." });
@@ -65,7 +66,7 @@ INSTRUCCIONES IMPORTANTES:
 Responde estrictamente en formato JSON.
 `;
 
-    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest"];
+    const modelsToTry = ["gemini-3.6-flash", "gemini-2.5-flash"];
     let jsonText = "";
 
     for (const modelName of modelsToTry) {
