@@ -65,6 +65,7 @@ export default function App() {
 
   // Refs for audio processing
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const timerRef = useRef<number | null>(null);
   const chunkIntervalRef = useRef<number | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
@@ -107,7 +108,7 @@ export default function App() {
     try {
       setTranscriptionState("requesting");
 
-      // Request screen/tab sharing with audio enabled
+      // Request screen/tab sharing with audio enabled (Chrome defaults audio on for tabs)
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           displaySurface: "browser",
@@ -118,7 +119,9 @@ export default function App() {
           noiseSuppression: false,
           autoGainControl: false,
         } as any,
-      });
+        systemAudio: "include",
+        surfaceSwitching: "include",
+      } as any);
 
       const audioTracks = displayStream.getAudioTracks();
 
@@ -180,7 +183,7 @@ export default function App() {
   };
 
   // Setup MediaRecorder and slice chunks
-  const startAudioRecorder = (mediaStream: MediaStream) => {
+  const startAudioRecorder = async (mediaStream: MediaStream) => {
     try {
       const audioTracks = mediaStream.getAudioTracks();
       if (audioTracks.length === 0) {
@@ -191,18 +194,46 @@ export default function App() {
         return;
       }
 
-      // Important: Create an audio-only stream so MediaRecorder doesn't fail when given video+audio display streams
-      const audioOnlyStream = new MediaStream(audioTracks);
+      // Cleanup any active AudioContext
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+        } catch {}
+        audioContextRef.current = null;
+      }
+
+      let recordingStream: MediaStream;
+
+      // Normalize stream via AudioContext to ensure 100% MediaRecorder compatibility across YouTube / exams / live tabs
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          if (ctx.state === "suspended") {
+            await ctx.resume();
+          }
+          const source = ctx.createMediaStreamSource(mediaStream);
+          const dest = ctx.createMediaStreamDestination();
+          source.connect(dest);
+          audioContextRef.current = ctx;
+          recordingStream = dest.stream;
+        } else {
+          recordingStream = new MediaStream(audioTracks);
+        }
+      } catch (audioCtxErr) {
+        console.warn("AudioContext normalization failed, using raw audio tracks:", audioCtxErr);
+        recordingStream = new MediaStream(audioTracks);
+      }
 
       const mimeType = getSupportedAudioMimeType();
       let mediaRecorder: MediaRecorder;
       try {
         mediaRecorder = mimeType
-          ? new MediaRecorder(audioOnlyStream, { mimeType })
-          : new MediaRecorder(audioOnlyStream);
+          ? new MediaRecorder(recordingStream, { mimeType })
+          : new MediaRecorder(recordingStream);
       } catch (e) {
         console.warn("MediaRecorder creation with mimeType failed, falling back to default:", e);
-        mediaRecorder = new MediaRecorder(audioOnlyStream);
+        mediaRecorder = new MediaRecorder(recordingStream);
       }
 
       recorderRef.current = mediaRecorder;
@@ -336,6 +367,13 @@ export default function App() {
 
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
+    }
+
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch {}
+      audioContextRef.current = null;
     }
 
     if (stream) {
