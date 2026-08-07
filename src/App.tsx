@@ -282,6 +282,7 @@ export default function App() {
     setIsProcessingChunk(true);
 
     try {
+      console.log(`[VoxStream Audio] Capturado chunk de audio: ${audioBlob.size} bytes (${mimeType})`);
       const base64Audio = await blobToBase64(audioBlob);
 
       // Extract previous context string from latest segments
@@ -307,9 +308,11 @@ export default function App() {
       }
 
       const data = await res.json();
+      console.log(`[VoxStream API] Respuesta servidor:`, data);
 
       if (data.transcript && data.transcript.trim()) {
         const text = data.transcript.trim();
+        console.log(`[VoxStream Transcripción] Nuevo texto detectado: "${text}"`);
         const currentMs = Date.now() - startTimeRef.current;
         const formattedTime = formatTimestamp(currentMs);
 

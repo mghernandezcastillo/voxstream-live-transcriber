@@ -50,6 +50,8 @@ app.post("/api/transcribe-chunk", async (req, res) => {
       cleanMimeType = "audio/webm";
     }
 
+    console.log(`[SERVER /api/transcribe-chunk] Recibido chunk de audio (${cleanBase64.length} chars base64, mimeType: ${cleanMimeType})`);
+
     const promptText = `
 Analiza el fragmento de audio proporcionado de una transmisión en vivo o pestaña de navegador y transcribe con alta precisión lo que se habla.
 
@@ -165,6 +167,8 @@ Responde estrictamente en formato JSON.
       parsed.transcript = jsonText;
       parsed.hasSpeech = Boolean(jsonText.trim());
     }
+
+    console.log(`[SERVER /api/transcribe-chunk RESULT] Transcrito: "${parsed.transcript}", Speech: ${parsed.hasSpeech}, Lenguaje: ${parsed.detectedLanguage}`);
 
     return res.json(parsed);
   } catch (error: any) {
