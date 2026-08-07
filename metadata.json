@@ -1,6 +1,6 @@
 {
-  "name": "Transcripción de Audio de Pestaña",
-  "description": "Aplicación para compartir el audio de cualquier pestaña del navegador y obtener transcripción en tiempo real, traducción en vivo y resúmenes con IA.",
+  "name": "VoxStream - Transcripción & Asistente IA",
+  "description": "Transcribe audio de pestañas en tiempo real, traduce simultáneamente y consulta el contenido de la pantalla con IA de ultra bajo consumo de tokens.",
   "requestFramePermissions": ["microphone", "display-capture"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
