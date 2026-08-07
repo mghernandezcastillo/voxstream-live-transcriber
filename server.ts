@@ -67,23 +67,24 @@ app.post("/api/transcribe-chunk", async (req, res) => {
     console.log(`[SERVER /api/transcribe-chunk] Recibido chunk de audio (${cleanBase64.length} chars base64, mimeType: ${cleanMimeType})`);
 
     const promptText = `
-Analiza el fragmento de audio proporcionado de una transmisión en vivo o pestaña de navegador y transcribe con alta precisión lo que se habla.
+Transcribe con absoluta fidelidad y precisión todo el diálogo, voz o habla que se escuche en este fragmento de audio.
 
-INSTRUCCIONES IMPORTANTES:
-1. Transcribe FIELMENTE el habla que escuchas en el idioma original en el que se está hablando (generalmente español o inglés).
-2. Si la opción de idioma preferido está fijada en '${targetLanguage}' y no es 'auto', procura transcribir o adaptar la salida principal a ${targetLanguage}, o mantén el idioma original si es lo más natural.
-3. Contexto anterior de la conversación para continuidad: "${previousContext.slice(-300)}"
-4. Si no se escucha ningún habla clara (solo silencio, música instrumental o ruido de fondo), responde con un texto vacío "".
-5. Identifica de manera aproximada si hay cambio de hablante si es relevante.
+INSTRUCCIONES OBLIGATORIAS:
+1. Transcribe palabra por palabra en el idioma original en el que se habla (principalmente Español o Inglés).
+2. Si el usuario solicitó idioma objetivo '${targetLanguage}' y no es 'auto', adecúa la transcripción o tradúcela si es apropiado, pero prioriza reflejar fielmente lo que se dice.
+3. Si el fragmento contiene habla comprensible, establece "hasSpeech": true y pon el texto transcrito en "transcript".
+4. Si el fragmento contiene solo silencio o música sin voz, establece "transcript": "" y "hasSpeech": false.
+5. Contexto reciente para coherencia: "${previousContext.slice(-200)}"
 
 Responde estrictamente en formato JSON.
 `;
 
-    const modelsToTry = ["gemini-3.6-flash", "gemini-2.5-flash"];
+    const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest"];
     let jsonText = "";
 
     for (const modelName of modelsToTry) {
       try {
+        console.log(`[SERVER /api/transcribe-chunk] Intentando transcripción con modelo: ${modelName}`);
         const response = await ai.models.generateContent({
           model: modelName,
           contents: {
@@ -128,10 +129,11 @@ Responde estrictamente en formato JSON.
 
         if (response.text) {
           jsonText = response.text;
+          console.log(`[SERVER /api/transcribe-chunk] Éxito con ${modelName} (schema):`, jsonText.slice(0, 100));
           break;
         }
       } catch (err: any) {
-        console.warn(`[transcribe-chunk] Model ${modelName} with schema failed:`, err?.message || err);
+        console.warn(`[SERVER /api/transcribe-chunk] Modelo ${modelName} con schema falló:`, err?.message || err);
 
         // Fallback without explicit schema
         try {
@@ -154,10 +156,11 @@ Responde estrictamente en formato JSON.
 
           if (responseSimple.text) {
             jsonText = responseSimple.text;
+            console.log(`[SERVER /api/transcribe-chunk] Éxito con ${modelName} (sin schema):`, jsonText.slice(0, 100));
             break;
           }
         } catch (err2: any) {
-          console.warn(`[transcribe-chunk] Model ${modelName} without schema failed:`, err2?.message || err2);
+          console.warn(`[SERVER /api/transcribe-chunk] Modelo ${modelName} sin schema falló:`, err2?.message || err2);
         }
       }
     }

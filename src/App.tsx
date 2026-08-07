@@ -290,8 +290,19 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             offset += buf.length;
           }
 
+          let maxVal = 0;
+          for (let i = 0; i < merged.length; i++) {
+            const abs = Math.abs(merged[i]);
+            if (abs > maxVal) maxVal = abs;
+          }
+
           const wavBlob = encodeWAV(merged, ctx.sampleRate);
-          console.log(`[VoxStream PCM Capture] Chunk WAV generado: ${merged.length} muestras (${wavBlob.size} bytes, ${ctx.sampleRate}Hz)`);
+          console.log(`[VoxStream PCM Capture] Chunk WAV generado: ${merged.length} muestras, Nivel Audio Peak: ${maxVal.toFixed(4)} (${wavBlob.size} bytes, ${ctx.sampleRate}Hz)`);
+
+          if (maxVal < 0.002) {
+            console.warn(`[VoxStream Audio Warning] El nivel de audio capturado es casi cero (${maxVal.toFixed(4)}). Verifica que la pestaña de YouTube no esté silenciada y que activaste 'Compartir audio de la pestaña'.`);
+          }
+
           await processAudioChunk(wavBlob, "audio/wav");
         }, intervalMs);
 
