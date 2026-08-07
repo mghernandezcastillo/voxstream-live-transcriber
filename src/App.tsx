@@ -182,8 +182,29 @@ export default function App() {
   // Setup MediaRecorder and slice chunks
   const startAudioRecorder = (mediaStream: MediaStream) => {
     try {
+      const audioTracks = mediaStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        setErrorMessage(
+          "⚠️ No se detectó canal de audio. Al compartir la pestaña, asegúrate de marcar la casilla 'Compartir audio de la pestaña'."
+        );
+        setTranscriptionState("idle");
+        return;
+      }
+
+      // Important: Create an audio-only stream so MediaRecorder doesn't fail when given video+audio display streams
+      const audioOnlyStream = new MediaStream(audioTracks);
+
       const mimeType = getSupportedAudioMimeType();
-      const mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+      let mediaRecorder: MediaRecorder;
+      try {
+        mediaRecorder = mimeType
+          ? new MediaRecorder(audioOnlyStream, { mimeType })
+          : new MediaRecorder(audioOnlyStream);
+      } catch (e) {
+        console.warn("MediaRecorder creation with mimeType failed, falling back to default:", e);
+        mediaRecorder = new MediaRecorder(audioOnlyStream);
+      }
+
       recorderRef.current = mediaRecorder;
 
       startTimeRef.current = Date.now();
@@ -195,6 +216,8 @@ export default function App() {
         }
       };
 
+      const effectiveMimeType = mediaRecorder.mimeType || mimeType || "audio/webm";
+
       mediaRecorder.start(1000); // collect 1s data slices
 
       setTranscriptionState("recording");
@@ -204,19 +227,19 @@ export default function App() {
       chunkIntervalRef.current = window.setInterval(async () => {
         if (chunksAccumulator.length === 0) return;
 
-        const combinedBlob = new Blob(chunksAccumulator, { type: mimeType });
+        const combinedBlob = new Blob(chunksAccumulator, { type: effectiveMimeType });
         chunksAccumulator = []; // reset accumulator for next interval
 
-        if (combinedBlob.size < 1500) {
+        if (combinedBlob.size < 1000) {
           // ignore tiny silent blobs
           return;
         }
 
-        await processAudioChunk(combinedBlob, mimeType);
+        await processAudioChunk(combinedBlob, effectiveMimeType);
       }, intervalMs);
     } catch (err: any) {
       console.error("Failed to start MediaRecorder:", err);
-      setErrorMessage("No se pudo iniciar el grabador de audio en el navegador.");
+      setErrorMessage(`No se pudo iniciar el grabador de audio: ${err.message || "Error del navegador"}`);
       setTranscriptionState("idle");
     }
   };
