@@ -1,0 +1,6 @@
+{
+  "name": "Transcripción de Audio de Pestaña",
+  "description": "Aplicación para compartir el audio de cualquier pestaña del navegador y obtener transcripción en tiempo real, traducción en vivo y resúmenes con IA.",
+  "requestFramePermissions": ["microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
