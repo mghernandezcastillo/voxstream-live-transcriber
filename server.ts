@@ -13,6 +13,19 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// Body parser error middleware handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err) {
+    console.error("[EXPRESS BODY PARSER ERROR]", err?.message || err);
+    return res.status(200).json({
+      error: "Payload size too large or malformed body",
+      transcript: "",
+      hasSpeech: false,
+    });
+  }
+  next();
+});
+
 // Initialize GoogleGenAI
 const getGenAI = () => {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -240,15 +253,21 @@ Responde estrictamente en JSON con el siguiente formato:
     const result = JSON.parse(response.text || "{}");
     return res.json(result);
   } catch (error: any) {
-    console.error("Error in /api/summarize-transcript:", error);
-    return res.status(500).json({ error: error?.message || "Error al resumir transcripción." });
+    console.error("[SERVER /api/summarize-transcript ERROR]", error?.message || error);
+    return res.json({
+      summary: "No se pudo generar el resumen en este momento.",
+      keyPoints: [],
+      topics: [],
+      actionItems: [],
+      error: error?.message,
+    });
   }
 });
 
 // API Endpoint: Translate Transcript Segment or Full
 app.post("/api/translate-transcript", async (req, res) => {
   try {
-    const { text, targetLanguage = "Inglés" } = req.body;
+    const { text, targetLanguage = "Inglés" } = req.body || {};
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "Texto vacío." });
@@ -263,15 +282,15 @@ app.post("/api/translate-transcript", async (req, res) => {
 
     return res.json({ translatedText: response.text?.trim() || text });
   } catch (error: any) {
-    console.error("Error in /api/translate-transcript:", error);
-    return res.status(500).json({ error: error?.message || "Error al traducir." });
+    console.error("[SERVER /api/translate-transcript ERROR]", error?.message || error);
+    return res.json({ translatedText: req.body?.text || "", error: error?.message });
   }
 });
 
 // API Endpoint: Ask Questions about the Transcript and Screen
 app.post("/api/chat-transcript", async (req, res) => {
   try {
-    const { fullTranscript, question, imageBase64 } = req.body;
+    const { fullTranscript, question, imageBase64 } = req.body || {};
 
     if (!question || !question.trim()) {
       return res.status(400).json({ error: "Pregunta vacía." });
@@ -322,15 +341,15 @@ ${question}
 
     return res.json({ answer: response.text?.trim() || "No pude generar una respuesta." });
   } catch (error: any) {
-    console.error("Error in /api/chat-transcript:", error);
-    return res.status(500).json({ error: error?.message || "Error al responder pregunta." });
+    console.error("[SERVER /api/chat-transcript ERROR]", error?.message || error);
+    return res.json({ answer: "Ocurrió un inconveniente al procesar la pregunta. Inténtalo de nuevo." });
   }
 });
 
 // API Endpoint: Fast Vision Query for Screen/Tab Captures (Exam Helper)
 app.post("/api/fast-vision-query", async (req, res) => {
   try {
-    const { imageBase64, prompt, mode = "fast_answer" } = req.body;
+    const { imageBase64, prompt, mode = "fast_answer" } = req.body || {};
 
     if (!imageBase64) {
       return res.status(400).json({ error: "No se proporcionó imagen de la pantalla." });
@@ -385,8 +404,8 @@ Responde de forma clara, directa y concisa a la consulta del usuario basándote 
       answer: response.text?.trim() || "No se detectó una pregunta clara en la imagen.",
     });
   } catch (error: any) {
-    console.error("Error in /api/fast-vision-query:", error);
-    return res.status(500).json({ error: error?.message || "Error al analizar la imagen de pantalla." });
+    console.error("[SERVER /api/fast-vision-query ERROR]", error?.message || error);
+    return res.json({ answer: "No se pudo analizar la imagen de pantalla en este momento." });
   }
 });
 
