@@ -51,7 +51,7 @@ app.post("/api/transcribe-chunk", async (req, res) => {
     }
 
     const promptText = `
-Analiza el fragmento de audio proporcionado de una transmisión en vivo y transcribe con alta precisión lo que se habla.
+Analiza el fragmento de audio proporcionado de una transmisión en vivo o pestaña de navegador y transcribe con alta precisión lo que se habla.
 
 INSTRUCCIONES IMPORTANTES:
 1. Transcribe FIELMENTE el habla que escuchas en el idioma original en el que se está hablando (generalmente español o inglés).
@@ -60,58 +60,107 @@ INSTRUCCIONES IMPORTANTES:
 4. Si no se escucha ningún habla clara (solo silencio, música instrumental o ruido de fondo), responde con un texto vacío "".
 5. Identifica de manera aproximada si hay cambio de hablante si es relevante.
 
-Responde strictly en formato JSON con el esquema solicitado.
+Responde estrictamente en formato JSON.
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: cleanMimeType,
-              data: cleanBase64,
-            },
-          },
-          {
-            text: promptText,
-          },
-        ],
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            transcript: {
-              type: Type.STRING,
-              description: "El texto transcrito exacto de este fragmento de audio.",
-            },
-            detectedLanguage: {
-              type: Type.STRING,
-              description: "El idioma detectado (ej: 'Español', 'Inglés').",
-            },
-            speaker: {
-              type: Type.STRING,
-              description: "Identificación o etiqueta del hablante si se puede inferir.",
-            },
-            hasSpeech: {
-              type: Type.BOOLEAN,
-              description: "Indica si se detectó voz o habla comprensible.",
-            },
-          },
-          required: ["transcript", "hasSpeech"],
-        },
-      },
-    });
+    const modelsToTry = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+    let jsonText = "";
+    let lastErr: any = null;
 
-    const jsonText = response.text || "{}";
+    for (const modelName of modelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: cleanMimeType,
+                  data: cleanBase64,
+                },
+              },
+              {
+                text: promptText,
+              },
+            ],
+          },
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                transcript: {
+                  type: Type.STRING,
+                  description: "El texto transcrito exacto de este fragmento de audio.",
+                },
+                detectedLanguage: {
+                  type: Type.STRING,
+                  description: "El idioma detectado (ej: 'Español', 'Inglés').",
+                },
+                speaker: {
+                  type: Type.STRING,
+                  description: "Identificación o etiqueta del hablante si se puede inferir.",
+                },
+                hasSpeech: {
+                  type: Type.BOOLEAN,
+                  description: "Indica si se detectó voz o habla comprensible.",
+                },
+              },
+              required: ["transcript", "hasSpeech"],
+            },
+          },
+        });
+
+        if (response.text) {
+          jsonText = response.text;
+          break;
+        }
+      } catch (err: any) {
+        console.warn(`[transcribe-chunk] Model ${modelName} with schema failed:`, err?.message || err);
+        lastErr = err;
+
+        // Try without explicit responseSchema (prompt-based JSON)
+        try {
+          const responseSimple = await ai.models.generateContent({
+            model: modelName,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: cleanMimeType,
+                    data: cleanBase64,
+                  },
+                },
+                {
+                  text: `${promptText}\n\nDevuelve ÚNICAMENTE un objeto JSON válido con los campos: "transcript" (string), "detectedLanguage" (string), "speaker" (string), "hasSpeech" (boolean).`,
+                },
+              ],
+            },
+          });
+
+          if (responseSimple.text) {
+            jsonText = responseSimple.text;
+            break;
+          }
+        } catch (err2: any) {
+          console.warn(`[transcribe-chunk] Model ${modelName} without schema failed:`, err2?.message || err2);
+          lastErr = err2;
+        }
+      }
+    }
+
+    if (!jsonText) {
+      throw lastErr || new Error("No se pudo obtener respuesta de ningún modelo de IA.");
+    }
+
     let parsed = { transcript: "", detectedLanguage: "Español", speaker: "", hasSpeech: false };
     try {
-      parsed = JSON.parse(jsonText);
+      // Clean potential code block backticks if prompt returns markdown ```json
+      const sanitized = jsonText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+      parsed = JSON.parse(sanitized);
     } catch {
-      parsed.transcript = response.text || "";
-      parsed.hasSpeech = Boolean(parsed.transcript.trim());
+      parsed.transcript = jsonText;
+      parsed.hasSpeech = Boolean(jsonText.trim());
     }
 
     return res.json(parsed);

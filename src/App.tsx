@@ -66,6 +66,7 @@ export default function App() {
   // Refs for audio processing
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const isRecordingRef = useRef<boolean>(false);
   const timerRef = useRef<number | null>(null);
   const chunkIntervalRef = useRef<number | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
@@ -237,36 +238,37 @@ export default function App() {
       }
 
       recorderRef.current = mediaRecorder;
-
+      isRecordingRef.current = true;
       startTimeRef.current = Date.now();
-      let chunksAccumulator: Blob[] = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          chunksAccumulator.push(e.data);
-        }
-      };
 
       const effectiveMimeType = mediaRecorder.mimeType || mimeType || "audio/webm";
 
-      mediaRecorder.start(1000); // collect 1s data slices
+      mediaRecorder.ondataavailable = async (e) => {
+        if (e.data && e.data.size > 1000) {
+          await processAudioChunk(e.data, effectiveMimeType);
+        }
+      };
 
+      mediaRecorder.onstop = () => {
+        // Restart recording next chunk if still actively transcribing
+        if (isRecordingRef.current && recorderRef.current && recorderRef.current.state === "inactive") {
+          try {
+            recorderRef.current.start();
+          } catch (err) {
+            console.warn("Error restarting MediaRecorder for next chunk:", err);
+          }
+        }
+      };
+
+      mediaRecorder.start(); // Start recording chunk 1
       setTranscriptionState("recording");
 
-      // Periodically process accumulated audio chunks
+      // Periodically stop & restart MediaRecorder so every chunk is a 100% standalone valid WebM file with EBML header
       const intervalMs = settings.chunkDurationSec * 1000;
-      chunkIntervalRef.current = window.setInterval(async () => {
-        if (chunksAccumulator.length === 0) return;
-
-        const combinedBlob = new Blob(chunksAccumulator, { type: effectiveMimeType });
-        chunksAccumulator = []; // reset accumulator for next interval
-
-        if (combinedBlob.size < 1000) {
-          // ignore tiny silent blobs
-          return;
+      chunkIntervalRef.current = window.setInterval(() => {
+        if (isRecordingRef.current && recorderRef.current && recorderRef.current.state === "recording") {
+          recorderRef.current.stop(); // Triggers ondataavailable with complete header + onstop restarts
         }
-
-        await processAudioChunk(combinedBlob, effectiveMimeType);
       }, intervalMs);
     } catch (err: any) {
       console.error("Failed to start MediaRecorder:", err);
@@ -363,6 +365,7 @@ export default function App() {
 
   // Stop Transcription
   const stopTranscription = () => {
+    isRecordingRef.current = false;
     if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
 
