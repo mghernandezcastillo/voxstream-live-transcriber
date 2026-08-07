@@ -39,8 +39,16 @@ app.post("/api/transcribe-chunk", async (req, res) => {
 
     const ai = getGenAI();
 
-    // Clean base64 string if data URL prefix exists
-    const cleanBase64 = audioBase64.replace(/^data:audio\/[a-z0-9]+;base64,/, "");
+    // Clean base64 string reliably whether it contains data URL prefix or codecs
+    const cleanBase64 = audioBase64.includes(",")
+      ? audioBase64.split(",")[1]
+      : audioBase64.replace(/^data:[^;]+;base64,/, "");
+
+    // Extract base mime type (e.g. "audio/webm" from "audio/webm;codecs=opus")
+    let cleanMimeType = (mimeType || "audio/webm").split(";")[0].trim();
+    if (!cleanMimeType || cleanMimeType === "application/octet-stream") {
+      cleanMimeType = "audio/webm";
+    }
 
     const promptText = `
 Analiza el fragmento de audio proporcionado de una transmisión en vivo y transcribe con alta precisión lo que se habla.
@@ -52,7 +60,7 @@ INSTRUCCIONES IMPORTANTES:
 4. Si no se escucha ningún habla clara (solo silencio, música instrumental o ruido de fondo), responde con un texto vacío "".
 5. Identifica de manera aproximada si hay cambio de hablante si es relevante.
 
-Responde estrictamente en formato JSON con el esquema solicitado.
+Responde strictly en formato JSON con el esquema solicitado.
 `;
 
     const response = await ai.models.generateContent({
@@ -61,7 +69,7 @@ Responde estrictamente en formato JSON con el esquema solicitado.
         parts: [
           {
             inlineData: {
-              mimeType: mimeType || "audio/webm",
+              mimeType: cleanMimeType,
               data: cleanBase64,
             },
           },
@@ -224,7 +232,9 @@ ${question}
     let contentsPayload: any;
 
     if (imageBase64) {
-      const cleanBase64 = imageBase64.replace(/^data:image\/[a-z0-9]+;base64,/, "");
+      const cleanBase64 = imageBase64.includes(",")
+        ? imageBase64.split(",")[1]
+        : imageBase64.replace(/^data:[^;]+;base64,/, "");
       contentsPayload = {
         parts: [
           {
@@ -266,7 +276,9 @@ app.post("/api/fast-vision-query", async (req, res) => {
     const ai = getGenAI();
 
     // Clean base64 image data
-    const cleanBase64 = imageBase64.replace(/^data:image\/[a-z0-9]+;base64,/, "");
+    const cleanBase64 = imageBase64.includes(",")
+      ? imageBase64.split(",")[1]
+      : imageBase64.replace(/^data:[^;]+;base64,/, "");
 
     let systemInstruction = "";
     if (mode === "fast_answer") {

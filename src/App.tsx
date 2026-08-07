@@ -300,7 +300,8 @@ export default function App() {
       });
 
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+        const errorJson = await res.json().catch(() => ({}));
+        throw new Error(errorJson.error || `HTTP ${res.status}`);
       }
 
       const data = await res.json();
