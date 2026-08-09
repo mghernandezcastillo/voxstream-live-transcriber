@@ -38,11 +38,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         <div className="space-y-4 text-xs font-sans">
-          {/* Audio Chunk Interval */}
+          {/* Gemini fallback chunk interval */}
           <div>
             <label className="block text-slate-200 font-semibold mb-1 flex items-center gap-1.5">
               <Sliders size={14} className="text-cyan-400" />
-              <span>Intervalo de Envío de Audio</span>
+              <span>Intervalo del respaldo Gemini</span>
             </label>
             <select
               value={settings.chunkDurationSec}

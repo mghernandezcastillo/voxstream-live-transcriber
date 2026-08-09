@@ -7,6 +7,10 @@ import {
   Settings,
 } from "./types";
 import { formatTimestamp, blobToBase64, getSupportedAudioMimeType } from "./utils/audioUtils";
+import {
+  BrowserSpeechTranscriber,
+  startBrowserSpeechTranscription,
+} from "./utils/browserSpeech";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { TabShareGuideModal } from "./components/TabShareGuideModal";
 import { LiveTranscriptStream } from "./components/LiveTranscriptStream";
@@ -66,7 +70,15 @@ export default function App() {
   // Refs for audio processing
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const browserSpeechRef = useRef<BrowserSpeechTranscriber | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const segmentsRef = useRef<TranscriptSegment[]>([]);
   const isRecordingRef = useRef<boolean>(false);
+  const audioChunkQueueRef = useRef<Array<{ blob: Blob; mimeType: string }>>([]);
+  const isDrainingChunkQueueRef = useRef(false);
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
   const chunkIntervalRef = useRef<number | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
@@ -85,6 +97,10 @@ export default function App() {
       videoPreviewRef.current.srcObject = stream;
     }
   }, [stream]);
+
+  useEffect(() => {
+    segmentsRef.current = segments;
+  }, [segments]);
 
   // Duration Timer
   useEffect(() => {
@@ -141,6 +157,7 @@ export default function App() {
         stopTranscription();
       });
 
+      streamRef.current = displayStream;
       setStream(displayStream);
       startAudioRecorder(displayStream);
     } catch (err: any) {
@@ -174,6 +191,7 @@ export default function App() {
         },
       });
 
+      streamRef.current = micStream;
       setStream(micStream);
       startAudioRecorder(micStream);
     } catch (err: any) {
@@ -225,7 +243,52 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-  // Setup audio capture using Web Audio PCM sampling for 100% clean WAV chunks
+  const appendTranscriptSegment = (
+    text: string,
+    language?: string,
+    speaker?: string
+  ) => {
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    const currentMs = Date.now() - startTimeRef.current;
+    const segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const newSegment: TranscriptSegment = {
+      id: segmentId,
+      timestamp: formatTimestamp(currentMs),
+      rawTimestampMs: currentMs,
+      text: cleanText,
+      speaker: speaker || undefined,
+      language: language || undefined,
+    };
+
+    setSegments((previousSegments) => [...previousSegments, newSegment]);
+
+    if (settings.autoTranslate) {
+      void fetch("/api/translate-transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: cleanText,
+          targetLanguage: settings.targetLanguage,
+        }),
+      })
+        .then((response) => response.json())
+        .then((translation) => {
+          if (!translation.translatedText) return;
+          setSegments((previousSegments) =>
+            previousSegments.map((segment) =>
+              segment.id === segmentId
+                ? { ...segment, translatedText: translation.translatedText }
+                : segment
+            )
+          );
+        })
+        .catch((error) => console.error("Translation error:", error));
+    }
+  };
+
+  // Prefer the browser's speech service. PCM + Gemini remains a compatibility fallback.
   const startAudioRecorder = async (mediaStream: MediaStream) => {
     try {
       const audioTracks = mediaStream.getAudioTracks();
@@ -249,6 +312,24 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       startTimeRef.current = Date.now();
       setTranscriptionState("recording");
 
+      const inputLanguage = document.documentElement.lang || navigator.language || "es-ES";
+      const browserSpeech = startBrowserSpeechTranscription(audioTracks[0], {
+        language: inputLanguage,
+        onTranscript: (text, language) => appendTranscriptSegment(text, language),
+        onError: (message) => {
+          setErrorMessage(`⚠️ ${message}`);
+          stopTranscription();
+        },
+      });
+
+      if (browserSpeech) {
+        browserSpeechRef.current = browserSpeech;
+        console.log("[VoxStream] Transcripción iniciada con Web Speech API sobre la pista compartida.");
+        return;
+      }
+
+      console.warn("[VoxStream] Web Speech API por pista no disponible; usando Gemini como respaldo.");
+
       let pcmBuffers: Float32Array[] = [];
 
       try {
@@ -263,6 +344,8 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         const audioOnlyStream = new MediaStream(audioTracks);
         const source = ctx.createMediaStreamSource(audioOnlyStream);
         const processor = ctx.createScriptProcessor(4096, 1, 1);
+        audioSourceRef.current = source;
+        audioProcessorRef.current = processor;
 
         processor.onaudioprocess = (e) => {
           if (!isRecordingRef.current) return;
@@ -303,11 +386,18 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             console.warn(`[VoxStream Audio Warning] El nivel de audio capturado es casi cero (${maxVal.toFixed(4)}). Verifica que la pestaña de YouTube no esté silenciada y que activaste 'Compartir audio de la pestaña'.`);
           }
 
-          await processAudioChunk(wavBlob, "audio/wav");
+          enqueueAudioChunk(wavBlob, "audio/wav");
         }, intervalMs);
 
       } catch (audioCtxErr) {
         console.warn("AudioContext PCM capture failed, falling back to MediaRecorder:", audioCtxErr);
+
+        if (audioContextRef.current) {
+          await audioContextRef.current.close().catch(() => {});
+          audioContextRef.current = null;
+        }
+        audioSourceRef.current = null;
+        audioProcessorRef.current = null;
 
         const recordingStream = new MediaStream(audioTracks);
         const mimeType = getSupportedAudioMimeType();
@@ -325,7 +415,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
         mediaRecorder.ondataavailable = async (e) => {
           if (e.data && e.data.size > 1000) {
-            await processAudioChunk(e.data, effectiveMimeType);
+            enqueueAudioChunk(e.data, effectiveMimeType);
           }
         };
 
@@ -338,23 +428,51 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
   };
 
-  // Send chunk to Gemini backend API
-  const processAudioChunk = async (audioBlob: Blob, mimeType: string) => {
+  // Gemini normally takes longer than the capture interval. Process chunks in order
+  // instead of sending overlapping requests that can hit rate limits or arrive shuffled.
+  const enqueueAudioChunk = (blob: Blob, mimeType: string) => {
+    if (!isRecordingRef.current) return;
+    audioChunkQueueRef.current.push({ blob, mimeType });
+    void drainAudioChunkQueue();
+  };
+
+  const drainAudioChunkQueue = async () => {
+    if (isDrainingChunkQueueRef.current) return;
+
+    isDrainingChunkQueueRef.current = true;
     setIsProcessingChunk(true);
 
+    try {
+      while (audioChunkQueueRef.current.length > 0) {
+        const nextChunk = audioChunkQueueRef.current.shift();
+        if (!nextChunk) continue;
+        await processAudioChunk(nextChunk.blob, nextChunk.mimeType);
+      }
+    } finally {
+      isDrainingChunkQueueRef.current = false;
+      setIsProcessingChunk(false);
+    }
+  };
+
+  // Send chunk to Gemini backend API
+  const processAudioChunk = async (audioBlob: Blob, mimeType: string) => {
     try {
       console.log(`[VoxStream Audio] Capturado chunk de audio: ${audioBlob.size} bytes (${mimeType})`);
       const base64Audio = await blobToBase64(audioBlob);
 
       // Extract previous context string from latest segments
-      const previousContext = segments
+      const previousContext = segmentsRef.current
         .slice(-3)
         .map((s) => s.text)
         .join(" ");
 
+      const abortController = new AbortController();
+      transcriptionAbortRef.current = abortController;
+
       const res = await fetch("/api/transcribe-chunk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({
           audioBase64: base64Audio,
           mimeType,
@@ -363,67 +481,60 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         }),
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        const errorJson = await res.json().catch(() => ({}));
-        console.warn(`[VoxStream API Warning] Servidor devolvió ${res.status}:`, errorJson);
+        const message = data.error || `El servidor de transcripción respondió con estado ${res.status}.`;
+        console.warn(`[VoxStream API Warning] Servidor devolvió ${res.status}:`, data);
+        setErrorMessage(`⚠️ ${message}`);
+        stopTranscription();
         return;
       }
 
-      const data = await res.json();
       console.log(`[VoxStream API] Respuesta servidor:`, data);
+
+      if (data.error) {
+        setErrorMessage(`⚠️ ${data.error}`);
+        stopTranscription();
+        return;
+      }
 
       if (data.transcript && data.transcript.trim()) {
         const text = data.transcript.trim();
         console.log(`[VoxStream Transcripción] Nuevo texto detectado: "${text}"`);
-        const currentMs = Date.now() - startTimeRef.current;
-        const formattedTime = formatTimestamp(currentMs);
-
-        let translatedText = "";
-        if (settings.autoTranslate) {
-          try {
-            const transRes = await fetch("/api/translate-transcript", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                text,
-                targetLanguage: settings.targetLanguage,
-              }),
-            });
-            const transData = await transRes.json();
-            translatedText = transData.translatedText || "";
-          } catch (tErr) {
-            console.error("Translation error:", tErr);
-          }
-        }
-
-        const newSegment: TranscriptSegment = {
-          id: `${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-          timestamp: formattedTime,
-          rawTimestampMs: currentMs,
-          text,
-          translatedText: translatedText || undefined,
-          speaker: data.speaker || undefined,
-          language: data.detectedLanguage || undefined,
-        };
-
-        setSegments((prev) => [...prev, newSegment]);
+        appendTranscriptSegment(text, data.detectedLanguage, data.speaker);
       }
     } catch (err: any) {
+      if (err?.name === "AbortError") return;
       console.error("Error processing chunk:", err);
+      setErrorMessage("⚠️ No se pudo conectar con el servicio de transcripción. Revisa la conexión y vuelve a intentarlo.");
+      stopTranscription();
     } finally {
-      setIsProcessingChunk(false);
+      transcriptionAbortRef.current = null;
     }
   };
 
   // Pause / Resume
   const togglePause = () => {
-    if (!recorderRef.current) return;
-
     if (transcriptionState === "recording") {
-      recorderRef.current.pause();
+      isRecordingRef.current = false;
+      if (browserSpeechRef.current) {
+        browserSpeechRef.current.pause();
+      } else if (recorderRef.current?.state === "recording") {
+        recorderRef.current.pause();
+      } else if (audioContextRef.current?.state === "running") {
+        void audioContextRef.current.suspend();
+      }
       setTranscriptionState("paused");
     } else if (transcriptionState === "paused") {
-      recorderRef.current.resume();
+      isRecordingRef.current = true;
+      if (browserSpeechRef.current) {
+        browserSpeechRef.current.resume();
+      } else if (recorderRef.current?.state === "paused") {
+        recorderRef.current.resume();
+      } else if (audioContextRef.current?.state === "suspended") {
+        void audioContextRef.current.resume();
+      }
       setTranscriptionState("recording");
     }
   };
@@ -433,10 +544,24 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     isRecordingRef.current = false;
     if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
+    chunkIntervalRef.current = null;
+    timerRef.current = null;
+    audioChunkQueueRef.current = [];
+    transcriptionAbortRef.current?.abort();
+    transcriptionAbortRef.current = null;
+
+    browserSpeechRef.current?.stop();
+    browserSpeechRef.current = null;
 
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
     }
+    recorderRef.current = null;
+
+    audioProcessorRef.current?.disconnect();
+    audioSourceRef.current?.disconnect();
+    audioProcessorRef.current = null;
+    audioSourceRef.current = null;
 
     if (audioContextRef.current) {
       try {
@@ -445,8 +570,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       audioContextRef.current = null;
     }
 
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
 
     setStream(null);
@@ -522,7 +648,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               </span>
             </h1>
             <p className="text-xs text-slate-400 hidden sm:block">
-              Transcripción en vivo y análisis inteligente de audio de pestaña con Gemini
+              Transcripción del navegador y análisis inteligente opcional con Gemini
             </p>
           </div>
         </div>
