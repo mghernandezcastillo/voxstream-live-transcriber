@@ -1,12 +1,12 @@
 # 🎙️ VoxStream - Transcripción en Vivo & Asistente de Pantalla (AI Exam Helper)
 
-VoxStream es una aplicación web full-stack que permite compartir el audio y la pantalla de cualquier pestaña del navegador (YouTube, Google Meet, Twitch, Zoom, etc.) para obtener **transcripción de voz en vivo**, **traducción simultánea**, **resúmenes ejecutivos** y **consultas visuales ultrarrápidas con IA** (asistente de examen/pantalla) impulsadas por Gemini 3.6 Flash.
+VoxStream es una aplicación web full-stack que permite compartir el audio y la pantalla de cualquier pestaña del navegador (YouTube, Google Meet, Twitch, Zoom, etc.) para obtener **transcripción de voz en vivo** con el reconocimiento del navegador, además de **traducción**, **resúmenes ejecutivos** y **consultas visuales con IA** impulsadas por Gemini 3.6 Flash.
 
 ---
 
 ## ⚡ Características Principales
 
-- 🎙️ **Transcripción en Tiempo Real:** Transcribe el audio transmitido de cualquier pestaña o micrófono.
+- 🎙️ **Transcripción en Tiempo Real:** Usa primero Web Speech API sobre la pista compartida; Gemini queda como respaldo de compatibilidad.
 - 🌐 **Traducción Simultánea:** Traduce automáticamente la conversación al idioma seleccionado.
 - ⚡ **Asistente Rápido de Pantalla (Exam Helper):** Captura fotogramas compresos en vivo y responde preguntas visuales (exámenes, fórmulas, gráficas) con ultra bajo consumo de tokens.
 - 💬 **Chat Inteligente Multimodal:** Realiza consultas a Gemini combinando la transcripción acumulada y la captura de pantalla actual.
@@ -27,7 +27,7 @@ VoxStream es una aplicación web full-stack que permite compartir el audio y la 
 2. Haz clic en **Add New...** > **Project**.
 3. Importa tu nuevo repositorio de GitHub (`voxstream-live-transcriber`).
 4. En la sección **Environment Variables** (Variables de Entorno), agrega:
-   - `GEMINI_API_KEY`: Tu clave de API de Google Gemini ([Consíguela en Google AI Studio](https://aistudio.google.com/)).
+   - `GEMINI_API_KEY`: necesaria para preguntas, resúmenes, traducción y el respaldo de transcripción ([consíguela en Google AI Studio](https://aistudio.google.com/)).
 5. Haz clic en **Deploy**. ¡Listo!
 
 ---

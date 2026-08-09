@@ -17,8 +17,9 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err) {
     console.error("[EXPRESS BODY PARSER ERROR]", err?.message || err);
-    return res.status(200).json({
+    return res.status(err?.status === 413 ? 413 : 400).json({
       error: "Payload size too large or malformed body",
+      code: "INVALID_REQUEST_BODY",
       transcript: "",
       hasSpeech: false,
     });
@@ -26,11 +27,14 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   next();
 });
 
+const getGeminiApiKey = () =>
+  process.env.GOOGLE_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || "";
+
 // Initialize GoogleGenAI
 const getGenAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getGeminiApiKey();
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is missing.");
+    throw new Error("GEMINI_API_KEY or GOOGLE_API_KEY environment variable is missing.");
   }
   return new GoogleGenAI({
     apiKey,
@@ -42,6 +46,13 @@ const getGenAI = () => {
   });
 };
 
+app.get("/api/health", (_req, res) => {
+  return res.json({
+    status: "ok",
+    geminiConfigured: Boolean(getGeminiApiKey()),
+  });
+});
+
 // API Endpoint: Transcribe Audio Chunk
 app.post("/api/transcribe-chunk", async (req, res) => {
   try {
@@ -49,6 +60,15 @@ app.post("/api/transcribe-chunk", async (req, res) => {
 
     if (!audioBase64) {
       return res.status(400).json({ error: "No audio data provided." });
+    }
+
+    if (!getGeminiApiKey()) {
+      return res.status(503).json({
+        error: "Gemini no está configurado. Falta GEMINI_API_KEY o GOOGLE_API_KEY en el servidor.",
+        code: "GEMINI_API_KEY_MISSING",
+        transcript: "",
+        hasSpeech: false,
+      });
     }
 
     const ai = getGenAI();
@@ -81,6 +101,7 @@ Responde estrictamente en formato JSON.
 
     const modelsToTry = ["gemini-3.6-flash", "gemini-flash-latest"];
     let jsonText = "";
+    const providerErrors: string[] = [];
 
     for (const modelName of modelsToTry) {
       try {
@@ -134,6 +155,7 @@ Responde estrictamente en formato JSON.
         }
       } catch (err: any) {
         console.warn(`[SERVER /api/transcribe-chunk] Modelo ${modelName} con schema falló:`, err?.message || err);
+        providerErrors.push(`${modelName} (schema): ${err?.message || String(err)}`);
 
         // Fallback without explicit schema
         try {
@@ -161,16 +183,18 @@ Responde estrictamente en formato JSON.
           }
         } catch (err2: any) {
           console.warn(`[SERVER /api/transcribe-chunk] Modelo ${modelName} sin schema falló:`, err2?.message || err2);
+          providerErrors.push(`${modelName} (simple): ${err2?.message || String(err2)}`);
         }
       }
     }
 
-    // If audio was undecodable or silent or no response, return graceful empty result
+    // A provider failure is not silence. Return an error so the UI can explain it.
     if (!jsonText) {
-      return res.json({
+      console.error("[SERVER /api/transcribe-chunk] Todos los intentos fallaron:", providerErrors);
+      return res.status(502).json({
+        error: "Gemini no pudo procesar el fragmento de audio. Revisa la clave, la cuota y los permisos del modelo.",
+        code: "TRANSCRIPTION_PROVIDER_ERROR",
         transcript: "",
-        detectedLanguage: "Español",
-        speaker: "",
         hasSpeech: false,
       });
     }
@@ -190,12 +214,11 @@ Responde estrictamente en formato JSON.
     return res.json(parsed);
   } catch (error: any) {
     console.error("Error in /api/transcribe-chunk:", error);
-    return res.json({
+    return res.status(500).json({
+      error: "Ocurrió un error interno al procesar el audio.",
+      code: "TRANSCRIPTION_INTERNAL_ERROR",
       transcript: "",
-      detectedLanguage: "Español",
-      speaker: "",
       hasSpeech: false,
-      warning: "Non-fatal chunk processing issue",
     });
   }
 });
