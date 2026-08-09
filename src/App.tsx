@@ -159,7 +159,7 @@ export default function App() {
 
       streamRef.current = displayStream;
       setStream(displayStream);
-      startAudioRecorder(displayStream);
+      startAudioRecorder(displayStream, "tab");
     } catch (err: any) {
       console.error("Error capturing tab audio:", err);
       if (
@@ -193,7 +193,7 @@ export default function App() {
 
       streamRef.current = micStream;
       setStream(micStream);
-      startAudioRecorder(micStream);
+      startAudioRecorder(micStream, "mic");
     } catch (err: any) {
       console.error("Error capturing mic audio:", err);
       setErrorMessage(`Error al acceder al micrófono: ${err.message || "Permiso denegado"}`);
@@ -250,6 +250,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   ) => {
     const cleanText = text.trim();
     if (!cleanText) return;
+    setErrorMessage(null);
 
     const currentMs = Date.now() - startTimeRef.current;
     const segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -289,7 +290,11 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   };
 
   // Prefer the browser's speech service. PCM + Gemini remains a compatibility fallback.
-  const startAudioRecorder = async (mediaStream: MediaStream) => {
+  const startAudioRecorder = async (
+    mediaStream: MediaStream,
+    captureSource: AudioSourceType,
+    skipBrowserSpeech = false
+  ) => {
     try {
       const audioTracks = mediaStream.getAudioTracks();
       if (audioTracks.length === 0) {
@@ -309,23 +314,36 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       }
 
       isRecordingRef.current = true;
-      startTimeRef.current = Date.now();
+      if (!skipBrowserSpeech) startTimeRef.current = Date.now();
       setTranscriptionState("recording");
 
-      const inputLanguage = document.documentElement.lang || navigator.language || "es-ES";
-      const browserSpeech = startBrowserSpeechTranscription(audioTracks[0], {
-        language: inputLanguage,
-        onTranscript: (text, language) => appendTranscriptSegment(text, language),
-        onError: (message) => {
-          setErrorMessage(`⚠️ ${message}`);
-          stopTranscription();
-        },
-      });
+      if (!skipBrowserSpeech) {
+        const inputLanguage = document.documentElement.lang || navigator.language || "es-ES";
+        const browserSpeech = startBrowserSpeechTranscription(
+          captureSource === "mic" ? null : audioTracks[0],
+          {
+            language: inputLanguage,
+            onTranscript: (text, language) => appendTranscriptSegment(text, language),
+            onError: (message, code) => {
+              const failedRecognition = browserSpeechRef.current;
+              browserSpeechRef.current = null;
+              failedRecognition?.stop();
+              console.warn(`[VoxStream] Web Speech falló (${code || "desconocido"}); activando respaldo Gemini.`);
+              setErrorMessage(`⚠️ ${message}. Se activó el respaldo de transcripción.`);
+              void startAudioRecorder(mediaStream, captureSource, true);
+            },
+          }
+        );
 
-      if (browserSpeech) {
-        browserSpeechRef.current = browserSpeech;
-        console.log("[VoxStream] Transcripción iniciada con Web Speech API sobre la pista compartida.");
-        return;
+        if (browserSpeech) {
+          browserSpeechRef.current = browserSpeech;
+          console.log(
+            captureSource === "mic"
+              ? "[VoxStream] Transcripción de micrófono iniciada con Web Speech API."
+              : "[VoxStream] Transcripción iniciada con Web Speech API sobre la pista compartida."
+          );
+          return;
+        }
       }
 
       console.warn("[VoxStream] Web Speech API por pista no disponible; usando Gemini como respaldo.");
