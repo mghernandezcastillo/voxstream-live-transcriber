@@ -13,7 +13,7 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const { default: app } = await import("../app");
+    const { default: app } = await import("./app");
     return app(req, res);
   } catch (error) {
     console.error("[VERCEL API STARTUP ERROR]", error);
