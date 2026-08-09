@@ -1,3 +1,5 @@
+import app from "./app";
+
 export default async function handler(req: any, res: any) {
   const requestPath = String(req.url || "").split("?")[0];
 
@@ -13,7 +15,6 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const { default: app } = await import("./app");
     return app(req, res);
   } catch (error) {
     console.error("[VERCEL API STARTUP ERROR]", error);
