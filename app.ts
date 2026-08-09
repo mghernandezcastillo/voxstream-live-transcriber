@@ -1,8 +1,4 @@
 import express from "express";
-import { GoogleGenAI, Type } from "@google/genai";
-import dotenv from "dotenv";
-
-dotenv.config();
 
 const app = express();
 
@@ -27,20 +23,25 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 const getGeminiApiKey = () =>
   process.env.GOOGLE_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || "";
 
-// Initialize GoogleGenAI
-const getGenAI = () => {
+// Load the Gemini SDK only when an AI route is used. This keeps health checks and
+// the Vercel function bootstrap independent from the provider SDK.
+const getGenAI = async () => {
   const apiKey = getGeminiApiKey();
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY or GOOGLE_API_KEY environment variable is missing.");
   }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
+  const { GoogleGenAI, Type } = await import("@google/genai");
+  return {
+    ai: new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
       },
-    },
-  });
+    }),
+    Type,
+  };
 };
 
 app.get("/api/health", (_req, res) => {
@@ -68,7 +69,7 @@ app.post("/api/transcribe-chunk", async (req, res) => {
       });
     }
 
-    const ai = getGenAI();
+    const { ai, Type } = await getGenAI();
 
     // Clean base64 string reliably whether it contains data URL prefix or codecs
     const cleanBase64 = audioBase64.includes(",")
@@ -229,7 +230,7 @@ app.post("/api/summarize-transcript", async (req, res) => {
       return res.status(400).json({ error: "Transcripción vacía." });
     }
 
-    const ai = getGenAI();
+    const { ai, Type } = await getGenAI();
 
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
@@ -296,7 +297,7 @@ app.post("/api/translate-transcript", async (req, res) => {
       return res.status(400).json({ error: "Texto vacío." });
     }
 
-    const ai = getGenAI();
+    const { ai } = await getGenAI();
 
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
@@ -319,7 +320,7 @@ app.post("/api/chat-transcript", async (req, res) => {
       return res.status(400).json({ error: "Pregunta vacía." });
     }
 
-    const ai = getGenAI();
+    const { ai } = await getGenAI();
 
     const promptText = `
 Eres VoxStream, un asistente IA en vivo para análisis de pantalla y audio transmitido.
@@ -378,7 +379,7 @@ app.post("/api/fast-vision-query", async (req, res) => {
       return res.status(400).json({ error: "No se proporcionó imagen de la pantalla." });
     }
 
-    const ai = getGenAI();
+    const { ai } = await getGenAI();
 
     // Clean base64 image data
     const cleanBase64 = imageBase64.includes(",")
