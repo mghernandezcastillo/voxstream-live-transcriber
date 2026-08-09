@@ -7,7 +7,7 @@ export interface BrowserSpeechTranscriber {
 interface BrowserSpeechOptions {
   language: string;
   onTranscript: (text: string, language: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, code?: string) => void;
 }
 
 interface SpeechRecognitionLike {
@@ -40,15 +40,18 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
 }
 
 /**
- * Starts browser speech recognition using the captured tab/microphone audio track.
- * Returns null when the browser does not expose the track-based Web Speech API.
+ * Starts browser speech recognition. When audioTrack is null, the browser uses
+ * its standard microphone capture path; explicit tracks are reserved for tab audio.
  */
 export function startBrowserSpeechTranscription(
-  audioTrack: MediaStreamTrack,
+  audioTrack: MediaStreamTrack | null,
   options: BrowserSpeechOptions
 ): BrowserSpeechTranscriber | null {
   const SpeechRecognition = getSpeechRecognitionConstructor();
-  if (!SpeechRecognition || audioTrack.kind !== "audio" || audioTrack.readyState !== "live") {
+  if (
+    !SpeechRecognition ||
+    (audioTrack !== null && (audioTrack.kind !== "audio" || audioTrack.readyState !== "live"))
+  ) {
     return null;
   }
 
@@ -62,15 +65,24 @@ export function startBrowserSpeechTranscription(
   let running = false;
   let restartTimer: number | null = null;
 
+  const isInputLive = () => audioTrack === null || audioTrack.readyState === "live";
+  const startRecognition = () => {
+    if (audioTrack) {
+      recognition.start(audioTrack);
+    } else {
+      recognition.start();
+    }
+  };
+
   const scheduleRestart = () => {
-    if (!active || paused || audioTrack.readyState !== "live" || restartTimer !== null) return;
+    if (!active || paused || !isInputLive() || restartTimer !== null) return;
 
     restartTimer = window.setTimeout(() => {
       restartTimer = null;
-      if (!active || paused || running || audioTrack.readyState !== "live") return;
+      if (!active || paused || running || !isInputLive()) return;
 
       try {
-        recognition.start(audioTrack);
+        startRecognition();
       } catch (error: any) {
         active = false;
         options.onError(error?.message || "El navegador no pudo reiniciar el reconocimiento de voz.");
@@ -95,7 +107,10 @@ export function startBrowserSpeechTranscription(
   recognition.onerror = (event) => {
     if (event.error === "aborted" || event.error === "no-speech") return;
     active = false;
-    options.onError(event.message || `Error de reconocimiento de voz: ${event.error || "desconocido"}`);
+    options.onError(
+      event.message || `Error de reconocimiento de voz: ${event.error || "desconocido"}`,
+      event.error
+    );
   };
 
   recognition.onend = () => {
@@ -104,7 +119,7 @@ export function startBrowserSpeechTranscription(
   };
 
   try {
-    recognition.start(audioTrack);
+    startRecognition();
   } catch {
     return null;
   }
