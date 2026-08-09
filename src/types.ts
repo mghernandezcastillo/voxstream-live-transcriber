@@ -24,6 +24,7 @@ export interface AISummary {
 
 export interface Settings {
   chunkDurationSec: number; // e.g. 3, 4, 5
+  inputLanguage: "spanish" | "english";
   autoTranslate: boolean;
   targetLanguage: string;
   autoScroll: boolean;

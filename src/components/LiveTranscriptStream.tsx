@@ -312,7 +312,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
         {isProcessingChunk && (
           <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-cyan-400/10 border border-cyan-400/30 text-cyan-300 text-xs font-semibold backdrop-blur-md animate-pulse">
             <Sparkles size={15} className="animate-spin text-cyan-400" />
-            <span>Procesando nuevo fragmento de audio con IA Gemini...</span>
+            <span>Procesando nuevo fragmento de audio...</span>
           </div>
         )}
       </div>
