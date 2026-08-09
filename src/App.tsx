@@ -505,7 +505,12 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         const message = data.error || `El servidor de transcripción respondió con estado ${res.status}.`;
         console.warn(`[VoxStream API Warning] Servidor devolvió ${res.status}:`, data);
         setErrorMessage(`⚠️ ${message}`);
-        stopTranscription();
+        if (
+          data.code === "GEMINI_API_KEY_MISSING" ||
+          data.code === "TRANSCRIPTION_PROVIDER_ERROR"
+        ) {
+          stopTranscription();
+        }
         return;
       }
 
@@ -513,7 +518,6 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
       if (data.error) {
         setErrorMessage(`⚠️ ${data.error}`);
-        stopTranscription();
         return;
       }
 
@@ -525,8 +529,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     } catch (err: any) {
       if (err?.name === "AbortError") return;
       console.error("Error processing chunk:", err);
-      setErrorMessage("⚠️ No se pudo conectar con el servicio de transcripción. Revisa la conexión y vuelve a intentarlo.");
-      stopTranscription();
+      setErrorMessage(
+        "⚠️ No se pudo conectar con el servicio de transcripción. Se volverá a intentar con el siguiente fragmento."
+      );
     } finally {
       transcriptionAbortRef.current = null;
     }
