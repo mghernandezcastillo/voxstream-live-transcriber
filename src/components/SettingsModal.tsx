@@ -38,11 +38,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         <div className="space-y-4 text-xs font-sans">
-          {/* Gemini fallback chunk interval */}
+          {/* Local Whisper chunk interval */}
           <div>
             <label className="block text-slate-200 font-semibold mb-1 flex items-center gap-1.5">
               <Sliders size={14} className="text-cyan-400" />
-              <span>Intervalo del respaldo Gemini</span>
+              <span>Intervalo de Whisper local</span>
             </label>
             <select
               value={settings.chunkDurationSec}
@@ -52,6 +52,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <option value={3}>3 segundos (Rápido - Recomendado)</option>
               <option value={4}>4 segundos (Equilibrado)</option>
               <option value={5}>5 segundos (Mayor contexto)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-slate-200 font-semibold mb-1 flex items-center gap-1.5">
+              <Languages size={14} className="text-cyan-400" />
+              <span>Idioma hablado</span>
+            </label>
+            <select
+              value={settings.inputLanguage}
+              onChange={(e) =>
+                onUpdateSettings({
+                  inputLanguage: e.target.value as Settings["inputLanguage"],
+                })
+              }
+              className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
+            >
+              <option value="spanish">Español</option>
+              <option value="english">English</option>
             </select>
           </div>
 

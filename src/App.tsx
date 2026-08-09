@@ -7,10 +7,6 @@ import {
   Settings,
 } from "./types";
 import { formatTimestamp, blobToBase64, getSupportedAudioMimeType } from "./utils/audioUtils";
-import {
-  BrowserSpeechTranscriber,
-  startBrowserSpeechTranscription,
-} from "./utils/browserSpeech";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { TabShareGuideModal } from "./components/TabShareGuideModal";
 import { LiveTranscriptStream } from "./components/LiveTranscriptStream";
@@ -36,6 +32,16 @@ import {
   Zap,
 } from "lucide-react";
 
+type LocalEngineStatus = "idle" | "loading" | "ready" | "fallback";
+
+type LocalAudioChunk = {
+  id: string;
+  audio: Float32Array;
+  sampleRate: number;
+  language: "spanish" | "english";
+  sessionId: number;
+};
+
 export default function App() {
   // State
   const [transcriptionState, setTranscriptionState] = useState<TranscriptionState>("idle");
@@ -47,6 +53,8 @@ export default function App() {
   const [isProcessingChunk, setIsProcessingChunk] = useState(false);
   const [recordingDurationMs, setRecordingDurationMs] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [localEngineStatus, setLocalEngineStatus] = useState<LocalEngineStatus>("idle");
+  const [localEngineBackend, setLocalEngineBackend] = useState<"webgpu" | "wasm" | null>(null);
 
   // Modals
   const [showGuideModal, setShowGuideModal] = useState(false);
@@ -57,7 +65,8 @@ export default function App() {
 
   // Settings
   const [settings, setSettings] = useState<Settings>({
-    chunkDurationSec: 3.5,
+    chunkDurationSec: 3,
+    inputLanguage: "spanish",
     autoTranslate: false,
     targetLanguage: "Inglés",
     autoScroll: true,
@@ -70,7 +79,6 @@ export default function App() {
   // Refs for audio processing
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const browserSpeechRef = useRef<BrowserSpeechTranscriber | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -78,6 +86,13 @@ export default function App() {
   const isRecordingRef = useRef<boolean>(false);
   const audioChunkQueueRef = useRef<Array<{ blob: Blob; mimeType: string }>>([]);
   const isDrainingChunkQueueRef = useRef(false);
+  const localWorkerRef = useRef<Worker | null>(null);
+  const localWorkerReadyRef = useRef(false);
+  const localWorkerFailedRef = useRef(false);
+  const localWorkerBusyRef = useRef(false);
+  const localAudioQueueRef = useRef<LocalAudioChunk[]>([]);
+  const localActiveChunkRef = useRef<LocalAudioChunk | null>(null);
+  const localSessionIdRef = useRef(0);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
   const chunkIntervalRef = useRef<number | null>(null);
@@ -88,6 +103,8 @@ export default function App() {
   useEffect(() => {
     return () => {
       stopTranscription();
+      localWorkerRef.current?.terminate();
+      localWorkerRef.current = null;
     };
   }, []);
 
@@ -289,11 +306,173 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
   };
 
-  // Prefer the browser's speech service. PCM + Gemini remains a compatibility fallback.
+  const sendChunkToGeminiFallback = (chunk: LocalAudioChunk) => {
+    if (!isRecordingRef.current || chunk.sessionId !== localSessionIdRef.current) return;
+    enqueueAudioChunk(encodeWAV(chunk.audio, chunk.sampleRate), "audio/wav");
+  };
+
+  const activateGeminiFallback = (failedChunk?: LocalAudioChunk | null) => {
+    localWorkerFailedRef.current = true;
+    localWorkerReadyRef.current = false;
+    localWorkerBusyRef.current = false;
+    localWorkerRef.current?.terminate();
+    localWorkerRef.current = null;
+    setLocalEngineStatus("fallback");
+    setIsProcessingChunk(false);
+
+    const queuedChunks = [
+      ...(failedChunk ? [failedChunk] : []),
+      ...localAudioQueueRef.current,
+    ];
+    localActiveChunkRef.current = null;
+    localAudioQueueRef.current = [];
+    queuedChunks.forEach(sendChunkToGeminiFallback);
+  };
+
+  const drainLocalAudioQueue = () => {
+    if (
+      !isRecordingRef.current ||
+      !localWorkerReadyRef.current ||
+      localWorkerBusyRef.current ||
+      !localWorkerRef.current
+    ) {
+      return;
+    }
+
+    let nextChunk = localAudioQueueRef.current.shift();
+    while (nextChunk && nextChunk.sessionId !== localSessionIdRef.current) {
+      nextChunk = localAudioQueueRef.current.shift();
+    }
+    if (!nextChunk) return;
+
+    localWorkerBusyRef.current = true;
+    localActiveChunkRef.current = nextChunk;
+    setIsProcessingChunk(true);
+
+    try {
+      localWorkerRef.current.postMessage({
+        type: "transcribe",
+        id: nextChunk.id,
+        audio: nextChunk.audio,
+        sampleRate: nextChunk.sampleRate,
+        language: nextChunk.language,
+      });
+    } catch (error) {
+      console.error("[VoxStream Local Whisper] No se pudo enviar audio al worker:", error);
+      activateGeminiFallback(nextChunk);
+    }
+  };
+
+  const ensureLocalTranscriptionWorker = () => {
+    if (localWorkerFailedRef.current) {
+      setLocalEngineStatus("fallback");
+      return;
+    }
+
+    if (localWorkerRef.current) {
+      if (localWorkerReadyRef.current) drainLocalAudioQueue();
+      return;
+    }
+
+    try {
+      setLocalEngineStatus("loading");
+      const worker = new Worker(
+        new URL("./workers/localTranscription.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+      localWorkerRef.current = worker;
+
+      worker.onmessage = ({ data }) => {
+        if (data?.backend === "webgpu" || data?.backend === "wasm") {
+          setLocalEngineBackend(data.backend);
+        }
+
+        if (data?.type === "ready") {
+          localWorkerReadyRef.current = true;
+          setLocalEngineStatus("ready");
+          console.log(
+            `[VoxStream] Whisper local listo con ${String(data.backend).toUpperCase()}.`,
+          );
+          drainLocalAudioQueue();
+          return;
+        }
+
+        if (data?.type === "result") {
+          const completedChunk = localActiveChunkRef.current;
+          localActiveChunkRef.current = null;
+          localWorkerBusyRef.current = false;
+          setIsProcessingChunk(false);
+
+          const text = String(data.text || "").trim();
+          if (
+            text &&
+            completedChunk?.id === data.id &&
+            completedChunk.sessionId === localSessionIdRef.current
+          ) {
+            appendTranscriptSegment(
+              text,
+              completedChunk.language === "spanish" ? "Español" : "English",
+            );
+          }
+
+          drainLocalAudioQueue();
+          return;
+        }
+
+        if (data?.type === "error") {
+          console.error("[VoxStream Local Whisper]", data.message || "Error desconocido");
+          activateGeminiFallback(localActiveChunkRef.current);
+        }
+      };
+
+      worker.onerror = (event) => {
+        console.error("[VoxStream Local Whisper Worker]", event.message || event);
+        activateGeminiFallback(localActiveChunkRef.current);
+      };
+
+      worker.postMessage({ type: "load" });
+    } catch (error) {
+      console.error("[VoxStream] No se pudo iniciar Whisper local:", error);
+      activateGeminiFallback();
+    }
+  };
+
+  const enqueueLocalAudioChunk = (audio: Float32Array, sampleRate: number) => {
+    const chunk: LocalAudioChunk = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      audio,
+      sampleRate,
+      language: settings.inputLanguage,
+      sessionId: localSessionIdRef.current,
+    };
+
+    if (localWorkerFailedRef.current) {
+      sendChunkToGeminiFallback(chunk);
+      return;
+    }
+
+    localAudioQueueRef.current.push(chunk);
+
+    // Several minutes of raw PCM still use modest memory. Drop only in an extreme
+    // stalled-load scenario; never send queued audio to Gemini just because loading is slow.
+    if (localAudioQueueRef.current.length > 200) {
+      localAudioQueueRef.current.shift();
+      console.warn("[VoxStream Local Whisper] Se descartó el fragmento más antiguo por cola saturada.");
+    }
+
+    ensureLocalTranscriptionWorker();
+    drainLocalAudioQueue();
+  };
+
+  // Begin downloading/caching Whisper as soon as the app opens so capture starts quickly.
+  useEffect(() => {
+    ensureLocalTranscriptionWorker();
+  }, []);
+
+  // Whisper runs locally in the browser. Gemini is only a compatibility fallback.
   const startAudioRecorder = async (
     mediaStream: MediaStream,
     captureSource: AudioSourceType,
-    skipBrowserSpeech = false
   ) => {
     try {
       const audioTracks = mediaStream.getAudioTracks();
@@ -314,45 +493,19 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       }
 
       isRecordingRef.current = true;
-      if (!skipBrowserSpeech) startTimeRef.current = Date.now();
+      localSessionIdRef.current += 1;
+      startTimeRef.current = Date.now();
       setTranscriptionState("recording");
-
-      if (!skipBrowserSpeech) {
-        const inputLanguage = document.documentElement.lang || navigator.language || "es-ES";
-        const browserSpeech = startBrowserSpeechTranscription(
-          captureSource === "mic" ? null : audioTracks[0],
-          {
-            language: inputLanguage,
-            onTranscript: (text, language) => appendTranscriptSegment(text, language),
-            onError: (message, code) => {
-              const failedRecognition = browserSpeechRef.current;
-              browserSpeechRef.current = null;
-              failedRecognition?.stop();
-              console.warn(`[VoxStream] Web Speech falló (${code || "desconocido"}); activando respaldo Gemini.`);
-              setErrorMessage(`⚠️ ${message}. Se activó el respaldo de transcripción.`);
-              void startAudioRecorder(mediaStream, captureSource, true);
-            },
-          }
-        );
-
-        if (browserSpeech) {
-          browserSpeechRef.current = browserSpeech;
-          console.log(
-            captureSource === "mic"
-              ? "[VoxStream] Transcripción de micrófono iniciada con Web Speech API."
-              : "[VoxStream] Transcripción iniciada con Web Speech API sobre la pista compartida."
-          );
-          return;
-        }
-      }
-
-      console.warn("[VoxStream] Web Speech API por pista no disponible; usando Gemini como respaldo.");
+      ensureLocalTranscriptionWorker();
+      console.log(
+        `[VoxStream] Captura de ${captureSource === "mic" ? "micrófono" : "pestaña"} iniciada con Whisper local.`,
+      );
 
       let pcmBuffers: Float32Array[] = [];
 
       try {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioCtx();
+        const ctx = new AudioCtx({ sampleRate: 16_000 });
         if (ctx.state === "suspended") {
           await ctx.resume();
         }
@@ -397,18 +550,19 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             if (abs > maxVal) maxVal = abs;
           }
 
-          const wavBlob = encodeWAV(merged, ctx.sampleRate);
-          console.log(`[VoxStream PCM Capture] Chunk WAV generado: ${merged.length} muestras, Nivel Audio Peak: ${maxVal.toFixed(4)} (${wavBlob.size} bytes, ${ctx.sampleRate}Hz)`);
+          console.log(`[VoxStream PCM Capture] Fragmento local: ${merged.length} muestras, nivel pico: ${maxVal.toFixed(4)} (${ctx.sampleRate}Hz)`);
 
           if (maxVal < 0.002) {
             console.warn(`[VoxStream Audio Warning] El nivel de audio capturado es casi cero (${maxVal.toFixed(4)}). Verifica que la pestaña de YouTube no esté silenciada y que activaste 'Compartir audio de la pestaña'.`);
+            return;
           }
 
-          enqueueAudioChunk(wavBlob, "audio/wav");
+          enqueueLocalAudioChunk(merged, ctx.sampleRate);
         }, intervalMs);
 
       } catch (audioCtxErr) {
         console.warn("AudioContext PCM capture failed, falling back to MediaRecorder:", audioCtxErr);
+        activateGeminiFallback();
 
         if (audioContextRef.current) {
           await audioContextRef.current.close().catch(() => {});
@@ -541,9 +695,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   const togglePause = () => {
     if (transcriptionState === "recording") {
       isRecordingRef.current = false;
-      if (browserSpeechRef.current) {
-        browserSpeechRef.current.pause();
-      } else if (recorderRef.current?.state === "recording") {
+      if (recorderRef.current?.state === "recording") {
         recorderRef.current.pause();
       } else if (audioContextRef.current?.state === "running") {
         void audioContextRef.current.suspend();
@@ -551,30 +703,32 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       setTranscriptionState("paused");
     } else if (transcriptionState === "paused") {
       isRecordingRef.current = true;
-      if (browserSpeechRef.current) {
-        browserSpeechRef.current.resume();
-      } else if (recorderRef.current?.state === "paused") {
+      if (recorderRef.current?.state === "paused") {
         recorderRef.current.resume();
       } else if (audioContextRef.current?.state === "suspended") {
         void audioContextRef.current.resume();
       }
       setTranscriptionState("recording");
+      drainLocalAudioQueue();
     }
   };
 
   // Stop Transcription
   const stopTranscription = () => {
     isRecordingRef.current = false;
+    localSessionIdRef.current += 1;
     if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
     chunkIntervalRef.current = null;
     timerRef.current = null;
     audioChunkQueueRef.current = [];
+    localAudioQueueRef.current = [];
+    if (!localActiveChunkRef.current) {
+      localWorkerBusyRef.current = false;
+    }
+    setIsProcessingChunk(false);
     transcriptionAbortRef.current?.abort();
     transcriptionAbortRef.current = null;
-
-    browserSpeechRef.current?.stop();
-    browserSpeechRef.current = null;
 
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
@@ -671,7 +825,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               </span>
             </h1>
             <p className="text-xs text-slate-400 hidden sm:block">
-              Transcripción del navegador y análisis inteligente opcional con Gemini
+              Transcripción local con Whisper y análisis opcional con Gemini
             </p>
           </div>
         </div>
@@ -818,7 +972,11 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               </span>
             </div>
 
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md">
+            <div
+              data-local-engine-status={localEngineStatus}
+              data-local-engine-backend={localEngineBackend || ""}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md"
+            >
               <span
                 className={`w-2.5 h-2.5 rounded-full ${
                   transcriptionState === "recording"
@@ -830,7 +988,13 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               />
               <span className="capitalize font-sans font-semibold text-slate-200">
                 {transcriptionState === "recording"
-                  ? "Transmitiendo"
+                  ? localEngineStatus === "loading"
+                    ? "Cargando Whisper..."
+                    : localEngineStatus === "ready"
+                      ? `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}`
+                      : localEngineStatus === "fallback"
+                        ? "Respaldo Gemini"
+                        : "Capturando..."
                   : transcriptionState === "paused"
                   ? "En Pausa"
                   : transcriptionState === "requesting"
